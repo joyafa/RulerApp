@@ -1,0 +1,23 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,28 L78,28 L78,80 L30,80 Z" />
+    <path
+        android:fillColor="#1E88E5"
+        android:pathData="M34,32 L74,32 L74,76 L34,76 Z" />
+    <!-- 刻度线 -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M34,36 L40,36 L40,42 L34,42 Z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M34,52 L37,52 L37,58 L34,58 Z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M34,64 L40,64 L40,70 L34,70 Z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M48,32 L48,36 L52,36 L52,32 Z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M60,32 L60,36 L64,36 L64,32 Z" />
+</vector>

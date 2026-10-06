@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>尺子 Ruler</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #fafafa; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; user-select: none; }
+
+  /* 尺子画布 */
+  #ruler { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  /* 顶部工具栏 */
+  .toolbar {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; background: rgba(255,255,255,0.85);
+    backdrop-filter: blur(6px); z-index: 10;
+  }
+  .toolbar button {
+    border: none; border-radius: 8px; padding: 8px 14px;
+    background: #e3f2fd; color: #1565c0; font-size: 13px; cursor: pointer;
+    font-weight: 600;
+  }
+  .toolbar button:active { background: #bbdefb; }
+  .spacer { flex: 1; }
+  #distance { color: #e53935; font-weight: bold; font-size: 17px; }
+
+  /* 底部提示 */
+  .hint {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    text-align: center; padding: 12px; background: rgba(255,255,255,0.85);
+    color: #555; font-size: 13px; z-index: 10;
+  }
+
+  /* 校准弹窗 */
+  .modal {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    z-index: 100; align-items: center; justify-content: center;
+  }
+  .modal.show { display: flex; }
+  .modal-box {
+    background: #fff; border-radius: 14px; padding: 22px;
+    width: 86%; max-width: 360px;
+  }
+  .modal-box h3 { margin-bottom: 12px; color: #222; }
+  .modal-box label { display: block; margin: 10px 0 4px; color: #666; font-size: 13px; }
+  .modal-box input {
+    width: 100%; padding: 10px; border: 1px solid #ccc;
+    border-radius: 8px; font-size: 16px;
+  }
+  .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .modal-actions button {
+    flex: 1; padding: 11px; border: none; border-radius: 8px;
+    font-size: 15px; cursor: pointer; font-weight: 600;
+  }
+  .btn-ok { background: #1e88e5; color: #fff; }
+  .btn-cancel { background: #eee; color: #333; }
+</style>
+</head>
+<body>
+
+<canvas id="ruler"></canvas>
+
+<div class="toolbar">
+  <button id="btnCalibrate">校准</button>
+  <button id="btnCamera" style="background:#1e88e5;color:#fff">相机测量</button>
+  <button id="btnUnit">单位: cm</button>
+  <button id="btnReset">重置</button>
+  <div class="spacer"></div>
+  <span id="distance">0.00 cm</span>
+</div>
+
+<div class="hint">拖动红色与蓝色游标测量物体长度</div>
+
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <h3>校准尺子</h3>
+    <p style="color:#666;font-size:13px;">将物体放在两游标之间，输入实际长度完成校准。</p>
+    <label>屏幕显示长度 (cm)</label>
+    <input type="number" step="0.01" id="etShown" />
+    <label>实际长度 (cm)</label>
+    <input type="number" step="0.01" id="etActual" placeholder="例如 5.00" />
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnCancel">取消</button>
+      <button class="btn-ok" id="btnOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const canvas = document.getElementById('ruler');
+  const ctx = canvas.getContext('2d');
+  const distanceEl = document.getElementById('distance');
+  const modal = document.getElementById('modal');
+
+  let dpr = window.devicePixelRatio || 1;
+  // 估算每毫米像素：浏览器无精确物理 DPI，以 96dpi / 25.4 为基础，再靠校准修正
+  let pxPerMm = 96 / 25.4;
+  let calibrationFactor = parseFloat(localStorage.getItem('ruler_cal') || '1');
+  let unit = localStorage.getItem('ruler_unit') || 'CM'; // CM | INCH
+
+  // 游标位置（CSS 像素）
+  let cursorA = { x: 0, y: 0 };
+  let cursorB = { x: 0, y: 0 };
+  let dragging = 0; // 0:none 1:A 2:B
+  const TOUCH_SLOP = 24;
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const w = window.innerWidth, h = window.innerHeight;
+    if (cursorA.x === 0 && cursorA.y === 0) { cursorA = { x: w * 0.3, y: h * 0.4 }; }
+    if (cursorB.x === 0 && cursorB.y === 0) { cursorB = { x: w * 0.7, y: h * 0.6 }; }
+    draw();
+  }
+
+  function effectivePxPerMm() { return pxPerMm * calibrationFactor; }
+
+  function draw() {
+    const w = window.innerWidth, h = window.innerHeight;
+    const px = effectivePxPerMm();
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#fafafa';
+    ctx.fillRect(0, 0, w, h);
+
+    drawHRuler(w, px);
+    drawVRuler(h, px);
+    drawCursors(w, h);
+    drawMeasure(px);
+    updateDistanceText(px);
+  }
+
+  function drawHRuler(w, px) {
+    const rulerH = 60;
+    ctx.strokeStyle = '#222';
+    ctx.fillStyle = '#222';
+    ctx.lineWidth = 1.5;
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+
+    if (unit === 'INCH') {
+      const pxPerInch = px * 25.4;
+      let inch = 0;
+      while (inch * pxPerInch <= w) {
+        const x = inch * pxPerInch;
+        const six = Math.round(inch * 16);
+        let len = rulerH * 0.2;
+        if (six % 16 === 0) len = rulerH;
+        else if (six % 8 === 0) len = rulerH * 0.7;
+        else if (six % 4 === 0) len = rulerH * 0.5;
+        else if (six % 2 === 0) len = rulerH * 0.3;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, len); ctx.stroke();
+        if (six % 16 === 0 && x > 0) ctx.fillText(Math.floor(inch).toString(), x, rulerH - 6);
+        inch += 1 / 16;
+      }
+    } else {
+      let mm = 0;
+      while (mm * px <= w) {
+        const x = mm * px;
+        let len = rulerH * 0.4;
+        if (mm % 10 === 0) len = rulerH;
+        else if (mm % 5 === 0) len = rulerH * 0.7;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, len); ctx.stroke();
+        if (mm % 10 === 0 && mm > 0) ctx.fillText((mm / 10).toString(), x, rulerH - 6);
+        mm++;
+      }
+    }
+    ctx.beginPath(); ctx.moveTo(0, rulerH); ctx.lineTo(w, rulerH); ctx.stroke();
+  }
+
+  function drawVRuler(h, px) {
+    const rulerW = 60;
+    ctx.strokeStyle = '#222';
+    ctx.fillStyle = '#222';
+    ctx.lineWidth = 1.5;
+    ctx.font = '14px sans-serif';
+
+    if (unit === 'INCH') {
+      const pxPerInch = px * 25.4;
+      let inch = 0;
+      while (inch * pxPerInch <= h) {
+        const y = inch * pxPerInch;
+        const six = Math.round(inch * 16);
+        let len = rulerW * 0.2;
+        if (six % 16 === 0) len = rulerW;
+        else if (six % 8 === 0) len = rulerW * 0.7;
+        else if (six % 4 === 0) len = rulerW * 0.5;
+        else if (six % 2 === 0) len = rulerW * 0.3;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(len, y); ctx.stroke();
+        if (six % 16 === 0 && y > 0) {
+          ctx.save();
+          ctx.translate(rulerW * 0.4, y);
+          ctx.rotate(-Math.PI / 2);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(Math.floor(inch).toString(), 0, 0);
+          ctx.restore();
+        }
+        inch += 1 / 16;
+      }
+    } else {
+      let mm = 0;
+      while (mm * px <= h) {
+        const y = mm * px;
+        let len = rulerW * 0.4;
+        if (mm % 10 === 0) len = rulerW;
+        else if (mm % 5 === 0) len = rulerW * 0.7;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(len, y); ctx.stroke();
+        if (mm % 10 === 0 && mm > 0) {
+          ctx.save();
+          ctx.translate(rulerW * 0.4, y);
+          ctx.rotate(-Math.PI / 2);
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText((mm / 10).toString(), 0, 0);
+          ctx.restore();
+        }
+        mm++;
+      }
+    }
+    ctx.beginPath(); ctx.moveTo(rulerW, 0); ctx.lineTo(rulerW, h); ctx.stroke();
+  }
+
+  function drawCursors(w, h) {
+    // A 红色
+    ctx.strokeStyle = '#e53935'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cursorA.x, 0); ctx.lineTo(cursorA.x, h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, cursorA.y); ctx.lineTo(w, cursorA.y); ctx.stroke();
+    ctx.fillStyle = '#e53935';
+    ctx.beginPath(); ctx.arc(cursorA.x, cursorA.y, 7, 0, Math.PI * 2); ctx.fill();
+    // B 蓝色
+    ctx.strokeStyle = '#1e88e5'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(cursorB.x, 0); ctx.lineTo(cursorB.x, h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, cursorB.y); ctx.lineTo(w, cursorB.y); ctx.stroke();
+    ctx.fillStyle = '#1e88e5';
+    ctx.beginPath(); ctx.arc(cursorB.x, cursorB.y, 7, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawMeasure(px) {
+    const dx = cursorB.x - cursorA.x;
+    const dy = cursorB.y - cursorA.y;
+    const distMm = Math.sqrt(dx * dx + dy * dy) / px;
+    const distCm = distMm / 10;
+    const label = unit === 'CM' ? distCm.toFixed(2) + ' cm' : (distMm / 25.4).toFixed(3) + ' in';
+    const mx = (cursorA.x + cursorB.x) / 2;
+    const my = (cursorA.y + cursorB.y) / 2;
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(229,57,53,0.9)';
+    roundRect(ctx, mx - tw / 2 - 14, my - 20, tw + 28, 36, 8); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, mx, my);
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  function updateDistanceText(px) {
+    const dx = cursorB.x - cursorA.x;
+    const dy = cursorB.y - cursorA.y;
+    const distMm = Math.sqrt(dx * dx + dy * dy) / px;
+    const distCm = distMm / 10;
+    distanceEl.textContent = unit === 'CM'
+      ? distCm.toFixed(2) + ' cm'
+      : (distCm / 2.54).toFixed(3) + ' in';
+  }
+
+  function getPos(e) {
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function onDown(e) {
+    e.preventDefault();
+    const p = getPos(e);
+    const dA = Math.hypot(p.x - cursorA.x, p.y - cursorA.y);
+    const dB = Math.hypot(p.x - cursorB.x, p.y - cursorB.y);
+    if (dA <= TOUCH_SLOP && dA <= dB) dragging = 1;
+    else if (dB <= TOUCH_SLOP) dragging = 2;
+    else dragging = 0;
+  }
+  function onMove(e) {
+    if (dragging === 0) return;
+    e.preventDefault();
+    const p = getPos(e);
+    const w = window.innerWidth, h = window.innerHeight;
+    if (dragging === 1) {
+      cursorA.x = Math.max(0, Math.min(w, p.x));
+      cursorA.y = Math.max(0, Math.min(h, p.y));
+    } else if (dragging === 2) {
+      cursorB.x = Math.max(0, Math.min(w, p.x));
+      cursorB.y = Math.max(0, Math.min(h, p.y));
+    }
+    draw();
+  }
+  function onUp() { dragging = 0; }
+
+  canvas.addEventListener('mousedown', onDown);
+  canvas.addEventListener('mousemove', onMove);
+  canvas.addEventListener('mouseup', onUp);
+  canvas.addEventListener('touchstart', onDown, { passive: false });
+  canvas.addEventListener('touchmove', onMove, { passive: false });
+  canvas.addEventListener('touchend', onUp);
+
+  // 单位切换
+  document.getElementById('btnUnit').addEventListener('click', function () {
+    unit = unit === 'CM' ? 'INCH' : 'CM';
+    localStorage.setItem('ruler_unit', unit);
+    this.textContent = '单位: ' + (unit === 'CM' ? 'cm' : 'in');
+    draw();
+  });
+  document.getElementById('btnUnit').textContent = '单位: ' + (unit === 'CM' ? 'cm' : 'in');
+
+  // 重置校准
+  document.getElementById('btnReset').addEventListener('click', function () {
+    calibrationFactor = 1;
+    localStorage.setItem('ruler_cal', '1');
+    draw();
+  });
+
+  // 跳转到相机测量
+  document.getElementById('btnCamera').addEventListener('click', function () {
+    window.location.href = 'camera.html';
+  });
+
+  // 校准弹窗
+  const btnCal = document.getElementById('btnCalibrate');
+  const etShown = document.getElementById('etShown');
+  const etActual = document.getElementById('etActual');
+  btnCal.addEventListener('click', function () {
+    // 预填当前显示长度
+    const dx = cursorB.x - cursorA.x;
+    const dy = cursorB.y - cursorA.y;
+    const distMm = Math.sqrt(dx * dx + dy * dy) / pxPerMm;
+    etShown.value = (distMm / 10).toFixed(2);
+    etActual.value = '';
+    modal.classList.add('show');
+  });
+  document.getElementById('btnCancel').addEventListener('click', () => modal.classList.remove('show'));
+  document.getElementById('btnOk').addEventListener('click', function () {
+    const shown = parseFloat(etShown.value);
+    const actual = parseFloat(etActual.value);
+    if (!shown || !actual || shown <= 0 || actual <= 0) { alert('请输入有效的长度值'); return; }
+    // 校准系数 = 显示 / 实际。
+    // effectivePxPerMm = basePxPerMm * calibrationFactor，
+    // 读数 = 像素距离 / effectivePxPerMm，故 factor>1 时读数减小。
+    calibrationFactor = shown / actual;
+    localStorage.setItem('ruler_cal', calibrationFactor.toString());
+    modal.classList.remove('show');
+    draw();
+  });
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+  resize();
+})();
+</script>
+</body>
+</html>

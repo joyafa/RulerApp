@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>相机测量 Camera Measure</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: -apple-system, "PingFang SC", sans-serif; user-select: none; }
+
+  #video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #overlay { position: fixed; inset: 0; touch-action: none; }
+
+  .toolbar {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; background: rgba(0,0,0,0.55);
+    backdrop-filter: blur(6px); z-index: 10;
+  }
+  .toolbar button {
+    border: none; border-radius: 8px; padding: 8px 14px;
+    background: #e3f2fd; color: #1565c0; font-size: 13px; cursor: pointer; font-weight: 600;
+  }
+  .toolbar button.primary { background: #1e88e5; color: #fff; }
+  .spacer { flex: 1; }
+  #result { color: #fff; font-weight: bold; font-size: 20px; }
+
+  .modal {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 100; align-items: center; justify-content: center;
+  }
+  .modal.show { display: flex; }
+  .modal-box { background: #fff; border-radius: 14px; padding: 22px; width: 86%; max-width: 360px; }
+  .modal-box h3 { margin-bottom: 10px; }
+  .modal-box label { display: block; margin: 10px 0 4px; color: #666; font-size: 13px; }
+  .modal-box input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 16px; }
+  .modal-actions { display: flex; gap: 10px; margin-top: 18px; }
+  .modal-actions button { flex: 1; padding: 11px; border: none; border-radius: 8px; font-size: 15px; cursor: pointer; font-weight: 600; }
+  .btn-ok { background: #1e88e5; color: #fff; }
+  .btn-cancel { background: #eee; color: #333; }
+</style>
+</head>
+<body>
+
+<video id="video" autoplay playsinline muted></video>
+<canvas id="overlay"></canvas>
+
+<div class="toolbar">
+  <button id="btnMode" class="primary">模式: 校准</button>
+  <button id="btnCalibrate">校准</button>
+  <button id="btnReset">重置</button>
+  <div class="spacer"></div>
+  <span id="result">--</span>
+</div>
+
+<div class="toolbar" style="top:auto;bottom:0;justify-content:center;">
+  <button id="btnAddSeg">累加</button>
+  <button id="btnSave">保存</button>
+  <button id="btnHistory">历史</button>
+  <button id="btnPhoto">拍照</button>
+</div>
+<div id="totalBox" style="display:none;position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#1565c0;color:#fff;padding:8px 14px;border-radius:8px;z-index:10;font-weight:bold;"></div>
+
+<div class="modal" id="historyModal">
+  <div class="modal-box">
+    <h3>历史记录</h3>
+    <div id="historyList" style="max-height:300px;overflow:auto;margin:10px 0;"></div>
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnHistClose">关闭</button>
+      <button class="btn-ok" id="btnHistClear">清空</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <h3>校准</h3>
+    <p id="calInfo" style="color:#666;font-size:13px;"></p>
+    <label>参考物实际长度 (mm)</label>
+    <input type="number" step="0.1" id="etActual" placeholder="如信用卡长边 85.6" />
+    <div class="modal-actions">
+      <button class="btn-cancel" id="btnCancel">取消</button>
+      <button class="btn-ok" id="btnOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+  const resultEl = document.getElementById('result');
+  const modal = document.getElementById('modal');
+  const calInfo = document.getElementById('calInfo');
+  const etActual = document.getElementById('etActual');
+
+  let mode = 'CALIBRATE'; // CALIBRATE | MEASURE
+  let mmPerPx = parseFloat(localStorage.getItem('cam_mm_per_px') || '0');
+  let refStart = null, refEnd = null;
+  let measureStart = null, measureEnd = null;
+  let measureStep = 0;
+  let lastCm = 0, totalCm = 0, segCount = 0;
+  let dragging = 0;
+  const SLOP = 26;
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    draw();
+  }
+
+  function draw() {
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    if (mode === 'CALIBRATE') {
+      if (refStart && refEnd) {
+        ctx.strokeStyle = '#FF9800'; ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(refStart.x, refStart.y); ctx.lineTo(refEnd.x, refEnd.y); ctx.stroke();
+      }
+      ctx.fillStyle = '#FF9800';
+      if (refStart) { ctx.beginPath(); ctx.arc(refStart.x, refStart.y, 12, 0, Math.PI*2); ctx.fill(); }
+      if (refEnd) { ctx.beginPath(); ctx.arc(refEnd.x, refEnd.y, 12, 0, Math.PI*2); ctx.fill(); }
+      drawHint('拖动橙色两点标记已知长度物体');
+    } else {
+      ctx.fillStyle = '#4CAF50';
+      if (measureStart) { ctx.beginPath(); ctx.arc(measureStart.x, measureStart.y, 12, 0, Math.PI*2); ctx.fill(); }
+      if (measureStart && measureEnd) {
+        ctx.strokeStyle = '#E53935'; ctx.lineWidth = 5;
+        ctx.beginPath(); ctx.moveTo(measureStart.x, measureStart.y); ctx.lineTo(measureEnd.x, measureEnd.y); ctx.stroke();
+        ctx.fillStyle = '#E53935';
+        ctx.beginPath(); ctx.arc(measureEnd.x, measureEnd.y, 12, 0, Math.PI*2); ctx.fill();
+        // 显示结果
+        const px = Math.hypot(measureEnd.x - measureStart.x, measureEnd.y - measureStart.y);
+        const mm = px * mmPerPx;
+        const label = mm >= 10 ? (mm/10).toFixed(2)+' cm' : mm.toFixed(1)+' mm';
+        const mx = (measureStart.x+measureEnd.x)/2, my = (measureStart.y+measureEnd.y)/2;
+        ctx.font = 'bold 22px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(229,57,53,0.92)';
+        roundRect(ctx, mx-tw/2-16, my-20, tw+32, 36, 8); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.fillText(label, mx, my);
+        resultEl.textContent = label;
+        lastCm = mm / 10;
+      }
+      drawHint(measureStep === 0 ? '点击设定起点' : '点击设定终点');
+    }
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r);
+    c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+  }
+
+  function drawHint(text) {
+    ctx.font = '24px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.shadowColor = 'black'; ctx.shadowBlur = 6;
+    ctx.fillText(text, canvas.width/2, canvas.height - 110);
+    ctx.shadowBlur = 0;
+  }
+
+  function getPos(e) {
+    const t = e.touches ? e.touches[0] : e;
+    return { x: t.clientX, y: t.clientY };
+  }
+
+  function onDown(e) {
+    e.preventDefault();
+    const p = getPos(e);
+    if (mode === 'CALIBRATE') {
+      const dS = refStart ? Math.hypot(p.x-refStart.x, p.y-refStart.y) : Infinity;
+      const dE = refEnd ? Math.hypot(p.x-refEnd.x, p.y-refEnd.y) : Infinity;
+      if (dS <= SLOP && dS <= dE) dragging = 1;
+      else if (dE <= SLOP) dragging = 2;
+      else dragging = 0;
+      if (!refStart) { refStart = p; dragging = 1; }
+      else if (!refEnd) { refEnd = p; dragging = 2; }
+      draw();
+    } else {
+      if (measureStep === 0) { measureStart = p; measureEnd = null; measureStep = 1; }
+      else { measureEnd = p; measureStep = 0; }
+      draw();
+    }
+  }
+  function onMove(e) {
+    if (mode !== 'CALIBRATE' || dragging === 0) return;
+    e.preventDefault();
+    const p = getPos(e);
+    if (dragging === 1) refStart = p;
+    else if (dragging === 2) refEnd = p;
+    draw();
+  }
+  function onUp() { dragging = 0; }
+
+  canvas.addEventListener('mousedown', onDown);
+  canvas.addEventListener('mousemove', onMove);
+  canvas.addEventListener('mouseup', onUp);
+  canvas.addEventListener('touchstart', onDown, { passive: false });
+  canvas.addEventListener('touchmove', onMove, { passive: false });
+  canvas.addEventListener('touchend', onUp);
+
+  // 模式切换
+  const btnMode = document.getElementById('btnMode');
+  const btnCalibrate = document.getElementById('btnCalibrate');
+  btnMode.addEventListener('click', function () {
+    if (mode === 'CALIBRATE') {
+      mode = 'MEASURE';
+      btnMode.textContent = '模式: 测量';
+      btnCalibrate.style.display = 'none';
+      resultEl.style.display = 'inline';
+      measureStart = null; measureEnd = null; measureStep = 0;
+    } else {
+      mode = 'CALIBRATE';
+      btnMode.textContent = '模式: 校准';
+      btnCalibrate.style.display = 'inline-block';
+      resultEl.style.display = 'none';
+    }
+    draw();
+  });
+
+  // 重置
+  document.getElementById('btnReset').addEventListener('click', function () {
+    if (mode === 'CALIBRATE') { refStart = null; refEnd = null; }
+    else { measureStart = null; measureEnd = null; measureStep = 0; resultEl.textContent = '--'; }
+    totalCm = 0; segCount = 0; lastCm = 0;
+    document.getElementById('totalBox').style.display = 'none';
+    draw();
+  });
+
+  // 多段累加
+  document.getElementById('btnAddSeg').addEventListener('click', function () {
+    if (lastCm <= 0) { alert('请先完成一次测量'); return; }
+    totalCm += lastCm; segCount++;
+    const box = document.getElementById('totalBox');
+    box.style.display = 'block';
+    box.textContent = '累计 ' + segCount + ' 段: ' + totalCm.toFixed(2) + ' cm';
+    measureStart = null; measureEnd = null; measureStep = 0; lastCm = 0;
+    resultEl.textContent = '--';
+    draw();
+  });
+
+  // 保存到历史
+  function saveHistory(type, valueCm) {
+    const list = JSON.parse(localStorage.getItem('ruler_history') || '[]');
+    list.push({ type, value: valueCm, time: Date.now() });
+    if (list.length > 100) list.shift();
+    localStorage.setItem('ruler_history', JSON.stringify(list));
+  }
+  document.getElementById('btnSave').addEventListener('click', function () {
+    if (lastCm <= 0) { alert('请先完成一次测量'); return; }
+    saveHistory('camera', lastCm);
+    alert('已保存到历史记录');
+  });
+
+  // 历史记录弹窗
+  const historyModal = document.getElementById('historyModal');
+  function renderHistory() {
+    const list = JSON.parse(localStorage.getItem('ruler_history') || '[]').reverse();
+    const el = document.getElementById('historyList');
+    if (list.length === 0) { el.innerHTML = '<p style="color:#999;text-align:center;padding:20px;">暂无记录</p>'; return; }
+    el.innerHTML = list.map(r => {
+      const t = new Date(r.time);
+      const ts = (t.getMonth()+1) + '-' + t.getDate() + ' ' + String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
+      const typeLabel = {ruler:'屏幕尺', camera:'相机', ar:'AR'}[r.type] || r.type;
+      const val = r.value >= 1 ? r.value.toFixed(2)+' cm' : (r.value*10).toFixed(1)+' mm';
+      return '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #eee;">'
+        + '<span style="background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:4px;font-size:12px;">' + typeLabel + '</span>'
+        + '<span style="font-weight:bold;">' + val + '</span>'
+        + '<span style="color:#999;font-size:12px;">' + ts + '</span></div>';
+    }).join('');
+  }
+  document.getElementById('btnHistory').addEventListener('click', function () {
+    renderHistory(); historyModal.classList.add('show');
+  });
+  document.getElementById('btnHistClose').addEventListener('click', () => historyModal.classList.remove('show'));
+  document.getElementById('btnHistClear').addEventListener('click', function () {
+    localStorage.removeItem('ruler_history'); renderHistory();
+  });
+
+  // 拍照（将视频帧+叠加层合成下载）
+  document.getElementById('btnPhoto').addEventListener('click', function () {
+    const w = canvas.width, h = canvas.height;
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const octx = out.getContext('2d');
+    try { octx.drawImage(video, 0, 0, w, h); } catch(e) {}
+    octx.drawImage(canvas, 0, 0);
+    const a = document.createElement('a');
+    a.download = 'ruler_' + Date.now() + '.png';
+    a.href = out.toDataURL('image/png');
+    a.click();
+  });
+
+  // 校准弹窗
+  btnCalibrate.addEventListener('click', function () {
+    if (!refStart || !refEnd) { alert('请先拖动橙色两点标记参考物'); return; }
+    const px = Math.hypot(refEnd.x-refStart.x, refEnd.y-refStart.y);
+    if (px < 5) { alert('参考点距离过小，请重新标记'); return; }
+    calInfo.textContent = '参考点像素距离: ' + px.toFixed(1) + ' px';
+    etActual.value = '';
+    modal.classList.add('show');
+  });
+  document.getElementById('btnCancel').addEventListener('click', () => modal.classList.remove('show'));
+  document.getElementById('btnOk').addEventListener('click', function () {
+    const actual = parseFloat(etActual.value);
+    if (!actual || actual <= 0) { alert('请输入有效长度'); return; }
+    const px = Math.hypot(refEnd.x-refStart.x, refEnd.y-refStart.y);
+    mmPerPx = actual / px;
+    localStorage.setItem('cam_mm_per_px', mmPerPx.toString());
+    modal.classList.remove('show');
+    alert('校准完成: ' + mmPerPx.toFixed(4) + ' mm/px');
+  });
+
+  // 启动摄像头
+  async function startCamera() {
+    try {
+      // 加超时保护，避免无摄像头环境下页面卡死
+      const stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' }, audio: false
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('摄像头访问超时')), 8000)
+        )
+      ]);
+      video.srcObject = stream;
+    } catch (err) {
+      // 无摄像头时显示提示，仍可演示校准/测量交互逻辑
+      video.style.background = '#222';
+      const tip = document.createElement('div');
+      tip.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#aaa;font-size:16px;text-align:center;z-index:1;';
+      tip.innerHTML = '摄像头不可用<br><span style="font-size:13px">仍可点击/拖动演示校准与测量逻辑</span>';
+      document.body.appendChild(tip);
+    }
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+  startCamera();
+})();
+</script>
+</body>
+</html>

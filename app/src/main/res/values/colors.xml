@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="ruler_background">#FAFAFA</color>
+    <color name="cursor_a">#E53935</color>
+    <color name="cursor_b">#1E88E5</color>
+</resources>
